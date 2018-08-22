@@ -1,0 +1,12 @@
+Baseline with Stratified5Fold
+	Mean val error: 0.7912699264716052 std 0.003945227967625532
+	nan_to_num
+		SMOTE
+			Mean val error: 0.7902824642206651 std 0.0034868265411168034
+	is_unbalanced
+		Mean val error: 0.7890134649059238 std 0.00405081152331069
+	scale_pos_weight
+	neptuneHP
+		Mean val error: 0.7915979895584793 std 0.0033969465094390375
+		nan_to_mum
+			Mean val error: 0.7912425585904439, std 0.0037821819083090832

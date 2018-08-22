@@ -4,6 +4,7 @@ from sklearn.model_selection import KFold, GridSearchCV, StratifiedKFold
 from sklearn.metrics import mean_squared_error, roc_auc_score
 import os
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from imblearn.over_sampling import SMOTE
 
 
 def generate_bagging_splits(n_size, nfold, bagging_size_ratio=1, random_seed=143):
@@ -19,6 +20,19 @@ def generate_bagging_splits(n_size, nfold, bagging_size_ratio=1, random_seed=143
         splits.append((t_index, v_index))
 
     return splits
+
+
+def resample_with_SMOTE(x_train, y_train, nan_type='nan_to_num'):
+    if nan_type == 'nan_to_num':
+        x_train = np.nan_to_num(x_train)
+    elif nan_type == 'remove':
+        x_train = x_train[~np.isnan(x_train).any(axis=1)]
+    print('Using SMOTE. Original Train size {}'.format(
+        x_train.shape[0]))
+    sm = SMOTE(random_state=12, ratio=1.0)
+    x_train, y_train = sm.fit_sample(x_train, y_train)
+    print('Resampled Train size {}'.format(
+        x_train.shape[0]))
 
 
 class NonFittedError(Exception):
@@ -59,8 +73,10 @@ class LightGBM():
 
         if self.params['metric'] in ['auc', 'binary_logloss', 'multi_logloss']:
             self.get_best_metric = max
+            self.get_best_iter = np.argmax
         else:
             self.get_best_metric = min
+            self.get_best_iter = np.argmin
 
     def fit(self, train_X, train_y, val_X, val_y, ES_rounds=100, steps=5000,
             verbose=150, return_oof_pred=True, **kwargs):
@@ -82,7 +98,7 @@ class LightGBM():
 
     def cv(self, X, Y, nfold=5, ES_rounds=100, steps=5000, random_seed=143,
            bootstrap=False, bagging_size_ratio=1, shuffle=True,
-           splits=None, importance_type='split'):
+           splits=None, importance_type='split', use_SMOTE=False):
         # Train LGB model using CV
         if splits is None:
             if bootstrap:
@@ -106,6 +122,14 @@ class LightGBM():
             x_val = X[val_index]
             y_val = Y[val_index]
 
+            if use_SMOTE:
+                print('Using SMOTE. Original Train size {}'.format(
+                    x_train.shape[0]))
+                sm = SMOTE(random_state=12, ratio=1.0)
+                x_train, y_train = sm.fit_sample(x_train, y_train)
+                print('Resampled Train size {}'.format(
+                    x_train.shape[0]))
+
             evals_result, oof_prediction = self.fit(train_X=x_train, train_y=y_train,
                                                     val_X=x_val, val_y=y_val,
                                                     ES_rounds=200,
@@ -116,12 +140,13 @@ class LightGBM():
             y_true.extend(y_val)
 
             if evals_result:
-                iter_nb = np.argmax(evals_result['valid_1']['auc'])
-                results.append(np.max(evals_result['valid_1']['auc']))
+                iter_nb = self.get_best_iter(evals_result['valid_1']['auc'])
+                results.append(self.get_best_metric(
+                    evals_result['valid_1']['auc']))
                 feature_imp.append(self.model.feature_importance(
                     importance_type='split', iteration=iter_nb))
 
-        print('Mean val error: {} std {}'.format(
+        print('Mean val error: {}, std {}'.format(
             np.mean(results), np.std(results)))
 
         out = dict(oof=np.array(oof_results), fi=feature_imp)
@@ -130,7 +155,7 @@ class LightGBM():
     def cv_predict(self, X, Y, test_X, nfold=5, ES_rounds=100, steps=5000,
                    random_seed=143, logloss=False,
                    bootstrap=False, bagging_size_ratio=1,
-                   return_oof_pred=False, splits=None):
+                   splits=None, importance_type='split', use_SMOTE=False):
         '''Fit model using CV and predict test using the average
          of all folds'''
         if splits is None:
@@ -145,26 +170,38 @@ class LightGBM():
                                      random_state=random_seed)
                 splits = kf.split(X, y=Y)
 
-        kFold_results = []
         oof_results = []
+        y_true = []
+        feature_imp = []
+        results = []
         for i, (train_index, val_index) in enumerate(splits):
             x_train = X[train_index]
             y_train = Y[train_index]
             x_val = X[val_index]
             y_val = Y[val_index]
 
+            if use_SMOTE:
+                print('Using SMOTE. Original Train size {}'.format(
+                    x_train.shape[0]))
+                sm = SMOTE(random_state=12, ratio=1.0)
+                x_train, y_train = sm.fit_sample(x_train, y_train)
+                print('Resampled Train size {}'.format(
+                    x_train.shape[0]))
+
             evals_result, oof_prediction = self.fit(train_X=x_train, train_y=y_train,
                                                     val_X=x_val, val_y=y_val,
                                                     ES_rounds=100,
                                                     steps=10000,
-                                                    return_oof_pred=return_oof_pred)
-            if return_oof_pred:
-                oof_results.extend(oof_prediction)
+                                                    return_oof_pred=True)
+            oof_results.extend(oof_prediction)
+            y_true.extend(y_val)
+
             if evals_result:
-                kFold_results.append(
-                    np.array(
-                        self.get_best_metric(
-                            evals_result['valid_1'][self.params['metric']])))
+                iter_nb = self.get_best_iter(evals_result['valid_1']['auc'])
+                results.append(self.get_best_metric(
+                    evals_result['valid_1']['auc']))
+                feature_imp.append(self.model.feature_importance(
+                    importance_type='split', iteration=iter_nb))
 
             # Get predictions
             if not i:
@@ -172,15 +209,12 @@ class LightGBM():
             else:
                 pred_y += self.predict(test_X, logloss=logloss)
 
-        kFold_results = np.array(kFold_results)
-        if kFold_results.size > 0:
-            print('Mean val error: {}, std {} '.format(
-                kFold_results.mean(), kFold_results.std()))
+        print('Mean val error: {}, std {}'.format(
+            np.mean(results), np.std(results)))
 
-        # Divide pred by the number of folds and return
-        if return_oof_pred:
-            return pred_y / nfold, np.array(oof_results)
-        return pred_y / nfold
+        out = dict(oof=np.array(oof_results),
+                   fi=feature_imp, test_pred=pred_y / nfold)
+        return out
 
     def multi_seed_cv_predict(self, X, Y, test_X, nfold=5, ES_rounds=100,
                               steps=5000,
