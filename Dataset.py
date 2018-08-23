@@ -4,6 +4,7 @@ import gc
 import time
 from contextlib import contextmanager
 import warnings
+import feature_extraction as fe
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
@@ -32,7 +33,8 @@ class KaggleDataset():
         self.data_path = data_path
         self.debug = debug
 
-    def load_data(self):
+    def load_data(self, use_application_agg=False,
+                  use_diffs_only_aggregates=True):
         num_rows = 10000 if self.debug else None
         df = self.application_train_test(num_rows)
         # Preprocess
@@ -43,16 +45,10 @@ class KaggleDataset():
             del bureau
             gc.collect()
         with timer("Process previous_applications"):
-            prev = self.previous_applications(num_rows)
-            print("Previous applications df shape:", prev.shape)
-            df = df.join(prev, how='left', on='SK_ID_CURR')
-            del prev
+            df = self.previous_applications(df, num_rows)
             gc.collect()
         with timer("Process POS-CASH balance"):
-            pos = self.pos_cash(num_rows)
-            print("Pos-cash balance df shape:", pos.shape)
-            df = df.join(pos, how='left', on='SK_ID_CURR')
-            del pos
+            df = self.pos_cash(df, num_rows)
             gc.collect()
         with timer("Process installments payments"):
             ins = self.installments_payments(num_rows)
@@ -61,10 +57,15 @@ class KaggleDataset():
             del ins
             gc.collect()
         with timer("Process credit card balance"):
-            cc = self.credit_card_balance(num_rows)
-            print("Credit card balance df shape:", cc.shape)
-            df = df.join(cc, how='left', on='SK_ID_CURR')
-            del cc
+            df = self.credit_card_balance(df, num_rows)
+            gc.collect()
+        if use_application_agg:
+            with timer("Process applications aggregations"):
+                app_agg = self.application_aggregations(
+                    num_rows, use_diffs_only=use_diffs_only_aggregates)
+                print("app_agg df shape:", app_agg.shape)
+                df = df.join(app_agg, how='left', on='SK_ID_CURR')
+            del app_agg
             gc.collect()
         # Divide df into train and test
         self.train_df = df[df['TARGET'].notnull()]
@@ -269,19 +270,26 @@ class KaggleDataset():
                 bureau_agg['{}AMT_CREDIT_SUM_DEBT_SUM'.format(status)]
         return bureau_agg
 
-    def previous_applications(self, num_rows=None, nan_as_category=True):
+    def previous_applications(self, df, num_rows=None, nan_as_category=True):
         # Preprocess previous_applications.csv
         prev = pd.read_csv(
             '{}/previous_application.csv'.format(self.data_path), nrows=num_rows)
-        prev, cat_cols = one_hot_encoder(prev, nan_as_category=True)
         # Days 365.243 values -> nan
         prev['DAYS_FIRST_DRAWING'].replace(365243, np.nan, inplace=True)
         prev['DAYS_FIRST_DUE'].replace(365243, np.nan, inplace=True)
         prev['DAYS_LAST_DUE_1ST_VERSION'].replace(365243, np.nan, inplace=True)
         prev['DAYS_LAST_DUE'].replace(365243, np.nan, inplace=True)
         prev['DAYS_TERMINATION'].replace(365243, np.nan, inplace=True)
-        # Add feature: value ask / value received percentage
+        # Add Feature engineer
         prev['APP_CREDIT_PERC'] = prev['AMT_APPLICATION'] / prev['AMT_CREDIT']
+        ####################################
+        prev_fe = fe.PreviousApplicationFeatures(num_workers=3)
+        prev_fe = prev_fe.fit(prev)
+        prev_fe.persist('prev_fe')
+        gm = fe.GroupbyMerge(id_columns=('SK_ID_CURR', 'SK_ID_CURR'))
+        df = gm.transform(df, prev_fe.features)
+        ########################################
+        prev, cat_cols = one_hot_encoder(prev, nan_as_category=True)
         # Previous applications numeric features
         num_aggregations = {
             'AMT_ANNUITY': ['max', 'mean'],
@@ -316,14 +324,24 @@ class KaggleDataset():
         refused_agg.columns = pd.Index(
             ['REFUSED_' + e[0] + "_" + e[1].upper() for e in refused_agg.columns.tolist()])
         prev_agg = prev_agg.join(refused_agg, how='left', on='SK_ID_CURR')
-        del refused, refused_agg, approved, approved_agg, prev
-        gc.collect()
-        return prev_agg
+        # join
+        df = df.join(prev_agg, how='left', on='SK_ID_CURR')
+        print("Previous applications df shape:",
+              prev.shape[1] + prev_fe.features.shape[1])
+        return df
 
-    def pos_cash(self, num_rows=None, nan_as_category=True):
+    def pos_cash(self, df, num_rows=None, nan_as_category=True):
         # Preprocess POS_CASH_balance.csv
         pos = pd.read_csv(
             '{}/POS_CASH_balance.csv'.format(self.data_path), nrows=num_rows)
+        #################
+        # pos_fe = fe.POSCASHBalanceFeatures(
+        #     [1, 5, 10, 20, 50, 100], [10, 50, 100, 500], num_workers=3)
+        # pos_fe = pos_fe.fit(pos)
+        # pos_fe.persist('pos_fe')
+        # gm = fe.GroupbyMerge(id_columns=('SK_ID_CURR', 'SK_ID_CURR'))
+        # df = gm.transform(df, pos_fe.features)
+        ###################
         pos, cat_cols = one_hot_encoder(pos, nan_as_category=True)
         # Features
         aggregations = {
@@ -339,9 +357,11 @@ class KaggleDataset():
             ['POS_' + e[0] + "_" + e[1].upper() for e in pos_agg.columns.tolist()])
         # Count pos cash accounts
         pos_agg['POS_COUNT'] = pos.groupby('SK_ID_CURR').size()
-        del pos
-        gc.collect()
-        return pos_agg
+        # print("Pos-cash balance df shape:",
+        #       pos_fe.features[1] + pos_agg.shape[1])
+        # join with main df
+        df = df.join(pos_agg, how='left', on='SK_ID_CURR')
+        return df
 
     def installments_payments(self, num_rows=None, nan_as_category=True):
         # Preprocess installments_payments.csv
@@ -379,21 +399,155 @@ class KaggleDataset():
         gc.collect()
         return ins_agg
 
-    def credit_card_balance(self, num_rows=None, nan_as_category=True):
+    def credit_card_balance(self, df, num_rows=None, nan_as_category=True):
         # Preprocess credit_card_balance.csv
         cc = pd.read_csv(
             '{}/credit_card_balance.csv'.format(self.data_path), nrows=num_rows)
         cc['AMT_DRAWINGS_ATM_CURRENT'][
             cc['AMT_DRAWINGS_ATM_CURRENT'] < 0] = np.nan
         cc['AMT_DRAWINGS_CURRENT'][cc['AMT_DRAWINGS_CURRENT'] < 0] = np.nan
+        ####################################
+        cc_fe = fe.CreditCardBalanceFeatures(num_workers=3)
+        cc_fe = cc_fe.fit(cc)
+        cc_fe.persist('cc_fe')
+        gm = fe.GroupbyMerge(id_columns=('SK_ID_CURR', 'SK_ID_CURR'))
+        df = gm.transform(df, cc_fe.features)
+        ########################################
         cc, cat_cols = one_hot_encoder(cc, nan_as_category=True)
         # General aggregations
         cc.drop(['SK_ID_PREV'], axis=1, inplace=True)
-        cc_agg = cc.groupby('SK_ID_CURR').agg(['max', 'mean', 'sum', 'var'])
+        cc_agg = cc.groupby('SK_ID_CURR').agg(
+            ['max', 'min', 'mean', 'sum', 'var'])
         cc_agg.columns = pd.Index(['CC_' + e[0] + "_" + e[1].upper()
                                    for e in cc_agg.columns.tolist()])
         # Count credit card lines
         cc_agg['CC_COUNT'] = cc.groupby('SK_ID_CURR').size()
-        del cc
-        gc.collect()
-        return cc_agg
+        print("Credit card balance df shape:",
+              cc_agg.shape[1] + cc_fe.features.shape[1])
+        df = df.join(cc_agg, how='left', on='SK_ID_CURR')
+        return df
+
+    def application_aggregations(self,  num_rows=None, use_diffs_only=True):
+        df = pd.read_csv(
+            '{}/application_train.csv'.format(self.data_path), nrows=num_rows)
+        test_df = pd.read_csv(
+            '{}/application_test.csv'.format(self.data_path), nrows=num_rows)
+        df = df.append(test_df).reset_index()
+        # DATA CLEANING
+        df['CODE_GENDER'].replace('XNA', np.nan, inplace=True)
+        df['DAYS_EMPLOYED'].replace(365243, np.nan, inplace=True)
+        df['DAYS_LAST_PHONE_CHANGE'].replace(0, np.nan, inplace=True)
+        df['NAME_FAMILY_STATUS'].replace('Unknown', np.nan, inplace=True)
+        df['ORGANIZATION_TYPE'].replace('XNA', np.nan, inplace=True)
+
+        groupby_aggregations = self.get_application_aggregation_recipes()
+
+        # Groupby
+        features = []
+        groupby_feature_names = []
+        for groupby_cols, specs in groupby_aggregations:
+            group_object = df.groupby(groupby_cols)
+            for select, agg in specs:
+                groupby_aggregate_name = self._create_colname_from_specs(
+                    groupby_cols, select, agg)
+                group_features = group_object[select].agg(agg).reset_index() \
+                    .rename(index=str,
+                            columns={select: groupby_aggregate_name})[groupby_cols + [groupby_aggregate_name]]
+
+                features.append((groupby_cols, group_features))
+                groupby_feature_names.append(groupby_aggregate_name)
+
+        # Merge
+        for groupby_cols, groupby_features in features:
+            df = df.merge(groupby_features,
+                          on=groupby_cols,
+                          how='left')
+        # Diff
+        diff_feature_names = []
+        for groupby_cols, specs in groupby_aggregations:
+            for select, agg in specs:
+                if agg in ['mean', 'median', 'max', 'min']:
+                    groupby_aggregate_name = self._create_colname_from_specs(
+                        groupby_cols, select, agg)
+                    diff_feature_name = '{}_diff'.format(
+                        groupby_aggregate_name)
+                    abs_diff_feature_name = '{}_abs_diff'.format(
+                        groupby_aggregate_name)
+
+                    df[diff_feature_name] = df[
+                        select] - df[groupby_aggregate_name]
+                    df[abs_diff_feature_name] = np.abs(
+                        df[select] - df[groupby_aggregate_name])
+
+                    diff_feature_names.append(diff_feature_name)
+                    diff_feature_names.append(abs_diff_feature_name)
+
+        if use_diffs_only:
+            feature_names = diff_feature_names
+        else:
+            feature_names = groupby_feature_names + diff_feature_names
+
+        return df[feature_names].astype(np.float32)
+
+    def get_application_aggregation_recipes(self):
+        cols_to_agg = ['AMT_CREDIT',
+                       'AMT_ANNUITY',
+                       'AMT_INCOME_TOTAL',
+                       'AMT_GOODS_PRICE',
+                       'EXT_SOURCE_1',
+                       'EXT_SOURCE_2',
+                       'EXT_SOURCE_3',
+                       'OWN_CAR_AGE',
+                       'REGION_POPULATION_RELATIVE',
+                       'DAYS_REGISTRATION',
+                       'CNT_CHILDREN',
+                       'CNT_FAM_MEMBERS',
+                       'DAYS_ID_PUBLISH',
+                       'DAYS_BIRTH',
+                       'DAYS_EMPLOYED'
+                       ]
+
+        aggs = ['min', 'mean', 'max', 'sum', 'var']
+        aggregation_pairs = [(col, agg) for col in cols_to_agg for agg in aggs]
+
+        APPLICATION_AGGREGATION_RECIPIES = [
+            (['NAME_EDUCATION_TYPE', 'CODE_GENDER'], aggregation_pairs),
+            (['NAME_FAMILY_STATUS', 'NAME_EDUCATION_TYPE'], aggregation_pairs),
+            (['NAME_FAMILY_STATUS', 'CODE_GENDER'], aggregation_pairs),
+            (['CODE_GENDER', 'ORGANIZATION_TYPE'], [('AMT_ANNUITY', 'mean'),
+                                                    ('AMT_INCOME_TOTAL', 'mean'),
+                                                    ('DAYS_REGISTRATION', 'mean'),
+                                                    ('EXT_SOURCE_1', 'mean')]),
+            (['CODE_GENDER', 'REG_CITY_NOT_WORK_CITY'], [('AMT_ANNUITY', 'mean'),
+                                                         ('CNT_CHILDREN', 'mean'),
+                                                         ('DAYS_ID_PUBLISH', 'mean')]),
+            (['CODE_GENDER', 'NAME_EDUCATION_TYPE', 'OCCUPATION_TYPE', 'REG_CITY_NOT_WORK_CITY'], [('EXT_SOURCE_1', 'mean'),
+                                                                                                   ('EXT_SOURCE_2', 'mean')]),
+            (['NAME_EDUCATION_TYPE', 'OCCUPATION_TYPE'], [('AMT_CREDIT', 'mean'),
+                                                          ('AMT_REQ_CREDIT_BUREAU_YEAR', 'mean'),
+                                                          ('APARTMENTS_AVG', 'mean'),
+                                                          ('BASEMENTAREA_AVG',
+                                                           'mean'),
+                                                          ('EXT_SOURCE_1', 'mean'),
+                                                          ('EXT_SOURCE_2', 'mean'),
+                                                          ('EXT_SOURCE_3', 'mean'),
+                                                          ('NONLIVINGAREA_AVG',
+                                                           'mean'),
+                                                          ('OWN_CAR_AGE', 'mean'),
+                                                          ('YEARS_BUILD_AVG', 'mean')]),
+            (['NAME_EDUCATION_TYPE', 'OCCUPATION_TYPE', 'REG_CITY_NOT_WORK_CITY'], [('ELEVATORS_AVG', 'mean'),
+                                                                                    ('EXT_SOURCE_1', 'mean')]),
+            (['OCCUPATION_TYPE'], [('AMT_ANNUITY', 'mean'),
+                                   ('CNT_CHILDREN', 'mean'),
+                                   ('CNT_FAM_MEMBERS', 'mean'),
+                                   ('DAYS_BIRTH', 'mean'),
+                                   ('DAYS_EMPLOYED', 'mean'),
+                                   ('DAYS_ID_PUBLISH', 'mean'),
+                                   ('DAYS_REGISTRATION', 'mean'),
+                                   ('EXT_SOURCE_1', 'mean'),
+                                   ('EXT_SOURCE_2', 'mean'),
+                                   ('EXT_SOURCE_3', 'mean')])]
+        return APPLICATION_AGGREGATION_RECIPIES
+
+    def _create_colname_from_specs(self, groupby_cols, agg, select):
+        return '{}_{}_{}'.format('_'.join(groupby_cols), agg, select)

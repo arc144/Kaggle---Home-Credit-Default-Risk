@@ -22,17 +22,18 @@ def generate_bagging_splits(n_size, nfold, bagging_size_ratio=1, random_seed=143
     return splits
 
 
-def resample_with_SMOTE(x_train, y_train, nan_type='nan_to_num'):
-    if nan_type == 'nan_to_num':
-        x_train = np.nan_to_num(x_train)
-    elif nan_type == 'remove':
-        x_train = x_train[~np.isnan(x_train).any(axis=1)]
-    print('Using SMOTE. Original Train size {}'.format(
-        x_train.shape[0]))
-    sm = SMOTE(random_state=12, ratio=1.0)
-    x_train, y_train = sm.fit_sample(x_train, y_train)
-    print('Resampled Train size {}'.format(
-        x_train.shape[0]))
+def normalized_accuracy(y_true, y_pred, threshold=0.5, verbose=True):
+    y_pred_copy = y_pred.copy()
+    y_pred_copy[y_pred_copy >= threshold] = 1
+    y_pred_copy[y_pred_copy < threshold] = 0
+    acc1 = np.mean(y_true[y_true == 1] == y_pred_copy[y_true == 1])
+    acc0 = np.mean(y_true[y_true == 0] == y_pred_copy[y_true == 0])
+    norm_acc = np.mean([acc0, acc1])
+    if verbose:
+        print('Accuracy class 0: ', acc0)
+        print('Accuracy class 1: ', acc1)
+        print('Normalized accuracy: ', norm_acc)
+    return {'norm_acc': norm_acc, 'acc0': acc0, 'acc1': acc1}
 
 
 class NonFittedError(Exception):
@@ -148,6 +149,7 @@ class LightGBM():
 
         print('Mean val error: {}, std {}'.format(
             np.mean(results), np.std(results)))
+        normalized_accuracy(np.array(y_val), np.array(oof_results))
 
         out = dict(oof=np.array(oof_results), fi=feature_imp)
         return out
@@ -211,6 +213,7 @@ class LightGBM():
 
         print('Mean val error: {}, std {}'.format(
             np.mean(results), np.std(results)))
+        normalized_accuracy(np.array(y_val), np.array(oof_results))
 
         out = dict(oof=np.array(oof_results),
                    fi=feature_imp, test_pred=pred_y / nfold)

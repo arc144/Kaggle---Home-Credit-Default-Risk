@@ -7,10 +7,10 @@ from analysis import display_importances
 
 # %% Load dataset and preprocess
 DATA_PATH = './data/'
-DEBUG = True
+DEBUG = False
 
 dataset = KaggleDataset(DATA_PATH, debug=DEBUG)
-dataset.load_data()
+dataset.load_data(use_application_agg=False)
 
 #%%
 X, Y = dataset.get_train_data()
@@ -19,7 +19,7 @@ X_test = dataset.get_test_data()
 
 # %% Split to train and val data
 gc.collect()
-PREDICT_TEST = False
+PREDICT_TEST = True
 
 RANDOM_SEED = 143
 NFOLD = 5
@@ -44,7 +44,7 @@ if MODEL_TYPE == 'LightGBM':
         min_split_gain=0.0222415,
         min_child_weight=40,
         lambda_l1=0.04, lambda_l2=0.073,
-        device='gpu', num_threads=3)
+        device='cpu', num_threads=3)
     
 
     fit_params = dict(nfold=NFOLD,  ES_rounds=100,

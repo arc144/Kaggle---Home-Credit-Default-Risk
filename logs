@@ -16,6 +16,10 @@ Baseline with Stratified5Fold
 		Mean val error: 0.7916293346314953, std 0.003802376688283443
 		Added Feat on Application
 			Mean val error: 0.7914572275477337, std 0.0034536368953981523
+			Added Feat on Bureau
+				Mean val error: 0.7925803757660047, std 0.0036531394754075186
+					Added Agg on Application
+						Mean val error: 0.7905952910589203, std 0.003449348907935949
 
 Prune 0 fi
 	Mean val error: 0.7913421886568984, std 0.003994912997970823
