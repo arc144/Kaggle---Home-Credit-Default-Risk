@@ -9,7 +9,7 @@ from analysis import display_importances
 DATA_PATH = './data/'
 DEBUG = False
 
-dataset = KaggleDataset(DATA_PATH, debug=DEBUG)
+dataset = KaggleDataset(DATA_PATH, debug=DEBUG, num_workers=11)
 dataset.load_data(use_application_agg=False)
 
 #%%

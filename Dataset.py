@@ -29,9 +29,10 @@ def one_hot_encoder(df, nan_as_category=True):
 class KaggleDataset():
     '''Dataset class to load and process competition data'''
 
-    def __init__(self, data_path, debug=False):
+    def __init__(self, data_path, debug=False, num_workers=4):
         self.data_path = data_path
         self.debug = debug
+        self.num_workers = num_workers
 
     def load_data(self, use_application_agg=False,
                   use_diffs_only_aggregates=True):
@@ -51,10 +52,7 @@ class KaggleDataset():
             df = self.pos_cash(df, num_rows)
             gc.collect()
         with timer("Process installments payments"):
-            ins = self.installments_payments(num_rows)
-            print("Installments payments df shape:", ins.shape)
-            df = df.join(ins, how='left', on='SK_ID_CURR')
-            del ins
+            df = self.installments_payments(df, num_rows)
             gc.collect()
         with timer("Process credit card balance"):
             df = self.credit_card_balance(df, num_rows)
@@ -283,7 +281,7 @@ class KaggleDataset():
         # Add Feature engineer
         prev['APP_CREDIT_PERC'] = prev['AMT_APPLICATION'] / prev['AMT_CREDIT']
         ####################################
-        prev_fe = fe.PreviousApplicationFeatures(num_workers=3)
+        prev_fe = fe.PreviousApplicationFeatures(num_workers=self.num_workers)
         prev_fe = prev_fe.fit(prev)
         prev_fe.persist('prev_fe')
         gm = fe.GroupbyMerge(id_columns=('SK_ID_CURR', 'SK_ID_CURR'))
@@ -336,7 +334,9 @@ class KaggleDataset():
             '{}/POS_CASH_balance.csv'.format(self.data_path), nrows=num_rows)
         #################
         # pos_fe = fe.POSCASHBalanceFeatures(
-        #     [1, 5, 10, 20, 50, 100], [10, 50, 100, 500], num_workers=3)
+        #     last_k_agg_periods=[6, 12],
+        #     last_k_trend_periods=[6, 12, 30],
+        #     num_workers=self.num_workers)
         # pos_fe = pos_fe.fit(pos)
         # pos_fe.persist('pos_fe')
         # gm = fe.GroupbyMerge(id_columns=('SK_ID_CURR', 'SK_ID_CURR'))
@@ -363,10 +363,22 @@ class KaggleDataset():
         df = df.join(pos_agg, how='left', on='SK_ID_CURR')
         return df
 
-    def installments_payments(self, num_rows=None, nan_as_category=True):
+    def installments_payments(self, df, num_rows=None, nan_as_category=True):
         # Preprocess installments_payments.csv
         ins = pd.read_csv(
             '{}/installments_payments.csv'.format(self.data_path), nrows=num_rows)
+        #################
+        ins_fe = fe.InstallmentPaymentsFeatures(
+            last_k_agg_periods=[1, 5, 10, 20, 50, 100],
+            last_k_agg_period_fractions=[
+                (5, 20), (5, 50), (10, 50), (10, 100), (20, 100)],
+            last_k_trend_periods=[10, 50, 100, 500],
+            num_workers=self.num_workers)
+        ins_fe = ins_fe.fit(ins)
+        ins_fe.persist('ins_fe')
+        gm = fe.GroupbyMerge(id_columns=('SK_ID_CURR', 'SK_ID_CURR'))
+        df = gm.transform(df, ins_fe.features)
+        ###################
         ins, cat_cols = one_hot_encoder(ins, nan_as_category=True)
         # Percentage and difference paid in each installment (amount paid and
         # installment value)
@@ -395,9 +407,11 @@ class KaggleDataset():
             ['INSTAL_' + e[0] + "_" + e[1].upper() for e in ins_agg.columns.tolist()])
         # Count installments accounts
         ins_agg['INSTAL_COUNT'] = ins.groupby('SK_ID_CURR').size()
-        del ins
-        gc.collect()
-        return ins_agg
+        print("Installments payments df shape:",
+              ins_fe.features.shape[1] + ins_agg.shape[1])
+        # join with main df
+        df = df.join(ins_agg, how='left', on='SK_ID_CURR')
+        return df
 
     def credit_card_balance(self, df, num_rows=None, nan_as_category=True):
         # Preprocess credit_card_balance.csv
@@ -407,7 +421,7 @@ class KaggleDataset():
             cc['AMT_DRAWINGS_ATM_CURRENT'] < 0] = np.nan
         cc['AMT_DRAWINGS_CURRENT'][cc['AMT_DRAWINGS_CURRENT'] < 0] = np.nan
         ####################################
-        cc_fe = fe.CreditCardBalanceFeatures(num_workers=3)
+        cc_fe = fe.CreditCardBalanceFeatures(num_workers=self.num_workers)
         cc_fe = cc_fe.fit(cc)
         cc_fe.persist('cc_fe')
         gm = fe.GroupbyMerge(id_columns=('SK_ID_CURR', 'SK_ID_CURR'))
