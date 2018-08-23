@@ -76,6 +76,7 @@ class KaggleDataset():
         # Define feature names
         self.feats = [f for f in self.train_df.columns if f not in [
             'TARGET', 'SK_ID_CURR', 'SK_ID_BUREAU', 'SK_ID_PREV', 'index']]
+        print('Using a total of {} train features'.format(len(self.feats)))
 
     def get_train_data(self):
         # Get train data as array
@@ -97,15 +98,16 @@ class KaggleDataset():
             '{}/application_test.csv'.format(self.data_path), nrows=num_rows)
         print("Train samples: {}, test samples: {}".format(len(df), len(test_df)))
         df = df.append(test_df).reset_index()
-        # Optional: Remove 4 applications with XNA CODE_GENDER (train set)
-        df = df[df['CODE_GENDER'] != 'XNA']
+        # DATA CLEANING
+        df['CODE_GENDER'].replace('XNA', np.nan, inplace=True)
+        df['DAYS_EMPLOYED'].replace(365243, np.nan, inplace=True)
+        df['DAYS_LAST_PHONE_CHANGE'].replace(0, np.nan, inplace=True)
+        df['NAME_FAMILY_STATUS'].replace('Unknown', np.nan, inplace=True)
+        df['ORGANIZATION_TYPE'].replace('XNA', np.nan, inplace=True)
 
         docs = [_f for _f in df.columns if 'FLAG_DOC' in _f]
         live = [_f for _f in df.columns if ('FLAG_' in _f) & (
             'FLAG_DOC' not in _f) & ('_FLAG_' not in _f)]
-
-        # NaN values for DAYS_EMPLOYED: 365.243 -> nan
-        df['DAYS_EMPLOYED'].replace(365243, np.nan, inplace=True)
 
         inc_by_org = df[['AMT_INCOME_TOTAL', 'ORGANIZATION_TYPE']].groupby(
             'ORGANIZATION_TYPE').median()['AMT_INCOME_TOTAL']
@@ -125,12 +127,6 @@ class KaggleDataset():
             'AMT_ANNUITY'] / (1 + df['AMT_INCOME_TOTAL'])
         df['NEW_SOURCES_PROD'] = df['EXT_SOURCE_1'] * \
             df['EXT_SOURCE_2'] * df['EXT_SOURCE_3']
-        df['NEW_EXT_SOURCES_MEAN'] = df[
-            ['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']].mean(axis=1)
-        df['NEW_SCORES_STD'] = df[
-            ['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']].std(axis=1)
-        df['NEW_SCORES_STD'] = df['NEW_SCORES_STD'].fillna(
-            df['NEW_SCORES_STD'].mean())
         df['NEW_CAR_TO_BIRTH_RATIO'] = df['OWN_CAR_AGE'] / df['DAYS_BIRTH']
         df['NEW_CAR_TO_EMPLOY_RATIO'] = df['OWN_CAR_AGE'] / df['DAYS_EMPLOYED']
         df['NEW_PHONE_TO_BIRTH_RATIO'] = df[
@@ -139,7 +135,27 @@ class KaggleDataset():
             'DAYS_LAST_PHONE_CHANGE'] / df['DAYS_EMPLOYED']
         df['NEW_CREDIT_TO_INCOME_RATIO'] = df[
             'AMT_CREDIT'] / df['AMT_INCOME_TOTAL']
+        # ############################ New FE ############################
+        df['children_ratio'] = df['CNT_CHILDREN'] / df['CNT_FAM_MEMBERS']
+        df['credit_to_goods_ratio'] = df['AMT_CREDIT'] / df['AMT_GOODS_PRICE']
+        df['income_per_person'] = df['AMT_INCOME_TOTAL'] / df['CNT_FAM_MEMBERS']
+        df['external_sources_weighted'] = df.EXT_SOURCE_1 * \
+            2 + df.EXT_SOURCE_2 * 3 + df.EXT_SOURCE_3 * 4
+        df['cnt_non_child'] = df['CNT_FAM_MEMBERS'] - df['CNT_CHILDREN']
+        df['child_to_non_child_ratio'] = df[
+            'CNT_CHILDREN'] / df['cnt_non_child']
+        df['income_per_non_child'] = df[
+            'AMT_INCOME_TOTAL'] / df['cnt_non_child']
+        df['credit_per_person'] = df['AMT_CREDIT'] / df['CNT_FAM_MEMBERS']
+        df['credit_per_child'] = df['AMT_CREDIT'] / (1 + df['CNT_CHILDREN'])
+        df['credit_per_non_child'] = df['AMT_CREDIT'] / df['cnt_non_child']
+        for function_name in ['min', 'max', 'sum', 'mean', 'std', 'nanmedian']:
+            df['external_sources_{}'.format(function_name)] = eval('np.{}'.format(function_name))(
+                df[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']], axis=1)
 
+        df['short_employment'] = (df['DAYS_EMPLOYED'] < -2000).astype(int)
+        df['young_age'] = (df['DAYS_BIRTH'] < -14000).astype(int)
+        # ##############################################################
         # Categorical features with Binary encode (0 or 1; two categories)
         for bin_feature in ['CODE_GENDER', 'FLAG_OWN_CAR', 'FLAG_OWN_REALTY']:
             df[bin_feature], uniques = pd.factorize(df[bin_feature])
@@ -157,12 +173,28 @@ class KaggleDataset():
         gc.collect()
         return df
 
-    def bureau_and_balance(self, num_rows=None, nan_as_category=True):
+    def bureau_and_balance(self, num_rows=None, nan_as_category=True,
+                           fill_missing=True, fill_value=0):
         # Preprocess bureau.csv and bureau_balance.csv
         bureau = pd.read_csv(
             '{}/bureau.csv'.format(self.data_path), nrows=num_rows)
         bb = pd.read_csv(
             '{}/bureau_balance.csv'.format(self.data_path), nrows=num_rows)
+
+        # Clean data
+        bureau['DAYS_CREDIT_ENDDATE'][
+            bureau['DAYS_CREDIT_ENDDATE'] < -40000] = np.nan
+        bureau['DAYS_CREDIT_UPDATE'][
+            bureau['DAYS_CREDIT_UPDATE'] < -40000] = np.nan
+        bureau['DAYS_ENDDATE_FACT'][
+            bureau['DAYS_ENDDATE_FACT'] < -40000] = np.nan
+
+        if fill_missing:
+            bureau['AMT_CREDIT_SUM'].fillna(fill_value, inplace=True)
+            bureau['AMT_CREDIT_SUM_DEBT'].fillna(fill_value, inplace=True)
+            bureau['AMT_CREDIT_SUM_OVERDUE'].fillna(fill_value, inplace=True)
+            bureau['CNT_CREDIT_PROLONG'].fillna(fill_value, inplace=True)
+
         bb, bb_cat = one_hot_encoder(bb, nan_as_category)
         bureau, bureau_cat = one_hot_encoder(bureau, nan_as_category)
 
@@ -178,16 +210,19 @@ class KaggleDataset():
         del bb, bb_agg
         gc.collect()
 
+        bureau['bureau_credit_enddate_binary'] = (
+            bureau['DAYS_CREDIT_ENDDATE'] > 0).astype(int)
         # Bureau and bureau_balance numeric features
         num_aggregations = {
-            'DAYS_CREDIT': ['mean', 'var'],
+            'DAYS_CREDIT': ['mean', 'var', 'count'],
+            'bureau_credit_enddate_binary': ['mean'],
             'DAYS_CREDIT_ENDDATE': ['mean'],
             'DAYS_CREDIT_UPDATE': ['mean'],
             'CREDIT_DAY_OVERDUE': ['mean'],
             'AMT_CREDIT_MAX_OVERDUE': ['mean'],
             'AMT_CREDIT_SUM': ['mean', 'sum'],
             'AMT_CREDIT_SUM_DEBT': ['mean', 'sum'],
-            'AMT_CREDIT_SUM_OVERDUE': ['mean'],
+            'AMT_CREDIT_SUM_OVERDUE': ['mean', 'sum'],
             'AMT_CREDIT_SUM_LIMIT': ['mean', 'sum'],
             'AMT_ANNUITY': ['max', 'mean'],
             'CNT_CREDIT_PROLONG': ['sum'],
@@ -195,6 +230,7 @@ class KaggleDataset():
             'MONTHS_BALANCE_MAX': ['max'],
             'MONTHS_BALANCE_SIZE': ['mean', 'sum']
         }
+
         # Bureau and bureau_balance categorical features
         cat_aggregations = {}
         for cat in bureau_cat:
@@ -221,6 +257,16 @@ class KaggleDataset():
         bureau_agg = bureau_agg.join(closed_agg, how='left', on='SK_ID_CURR')
         del closed, closed_agg, bureau
         gc.collect()
+
+        # New feats
+        for status in ['ACTIVE_', 'CLOSED_']:
+            bureau_agg['{}bureau_debt_credit_ratio'.format(status)] = \
+                bureau_agg['{}AMT_CREDIT_SUM_DEBT_SUM'.format(status)] / \
+                bureau_agg['{}AMT_CREDIT_SUM_SUM'.format(status)]
+
+            bureau_agg['{}bureau_overdue_debt_ratio'.format(status)] = \
+                bureau_agg['{}AMT_CREDIT_SUM_OVERDUE_SUM'.format(status)] / \
+                bureau_agg['{}AMT_CREDIT_SUM_DEBT_SUM'.format(status)]
         return bureau_agg
 
     def previous_applications(self, num_rows=None, nan_as_category=True):
@@ -337,6 +383,9 @@ class KaggleDataset():
         # Preprocess credit_card_balance.csv
         cc = pd.read_csv(
             '{}/credit_card_balance.csv'.format(self.data_path), nrows=num_rows)
+        cc['AMT_DRAWINGS_ATM_CURRENT'][
+            cc['AMT_DRAWINGS_ATM_CURRENT'] < 0] = np.nan
+        cc['AMT_DRAWINGS_CURRENT'][cc['AMT_DRAWINGS_CURRENT'] < 0] = np.nan
         cc, cat_cols = one_hot_encoder(cc, nan_as_category=True)
         # General aggregations
         cc.drop(['SK_ID_PREV'], axis=1, inplace=True)

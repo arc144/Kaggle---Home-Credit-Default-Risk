@@ -10,3 +10,14 @@ Baseline with Stratified5Fold
 		Mean val error: 0.7915979895584793 std 0.0033969465094390375
 		nan_to_mum
 			Mean val error: 0.7912425585904439, std 0.0037821819083090832
+
+Baseline with Stratified5Fold
+	Feature Cleaning
+		Mean val error: 0.7916293346314953, std 0.003802376688283443
+		Added Feat on Application
+			Mean val error: 0.7914572275477337, std 0.0034536368953981523
+
+Prune 0 fi
+	Mean val error: 0.7913421886568984, std 0.003994912997970823
+	second level prune
+		Mean val error: 0.7918223901036008, std 0.0040154112841769935
