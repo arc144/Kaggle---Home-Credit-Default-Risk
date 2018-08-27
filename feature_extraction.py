@@ -7,6 +7,9 @@ from sklearn.linear_model import LinearRegression
 from tqdm import tqdm
 import gc
 from sklearn.externals import joblib
+from steppy.base import BaseTransformer
+import category_encoders as ce
+from copy import deepcopy
 
 
 def chunk_groups(groupby_object, chunk_size):
@@ -458,12 +461,16 @@ class InstallmentPaymentsFeatures(BasicHandCraftedFeatures):
     @staticmethod
     def generate_features(gr, agg_periods, trend_periods, period_fractions):
         all = InstallmentPaymentsFeatures.all_installment_features(gr)
+        gc.collect()
         agg = InstallmentPaymentsFeatures.last_k_installment_features_with_fractions(gr,
                                                                                      agg_periods,
                                                                                      period_fractions)
+        gc.collect()
         trend = InstallmentPaymentsFeatures.trend_in_last_k_installment_features(
             gr, trend_periods)
+        gc.collect()
         last = InstallmentPaymentsFeatures.last_loan_features(gr)
+        gc.collect()
         features = {**all, **agg, **trend, **last}
         return pd.Series(features)
 
@@ -573,10 +580,147 @@ class InstallmentPaymentsFeatures(BasicHandCraftedFeatures):
         return features
 
 
-class GroupbyMerge():
+class ApplicationFeatures(BaseTransformer):
+
+    def __init__(self, categorical_columns, numerical_columns):
+        self.categorical_columns = categorical_columns
+        self.numerical_columns = numerical_columns
+        self.engineered_numerical_columns = ['annuity_income_percentage',
+                                             'car_to_birth_ratio',
+                                             'car_to_employ_ratio',
+                                             'children_ratio',
+                                             'credit_to_annuity_ratio',
+                                             'credit_to_goods_ratio',
+                                             'credit_to_income_ratio',
+                                             'days_employed_percentage',
+                                             'income_credit_percentage',
+                                             'income_per_child',
+                                             'income_per_person',
+                                             'payment_rate',
+                                             'phone_to_birth_ratio',
+                                             'phone_to_employ_ratio',
+                                             'external_sources_weighted',
+                                             'external_sources_min',
+                                             'external_sources_max',
+                                             'external_sources_sum',
+                                             'external_sources_mean',
+                                             'external_sources_nanmedian',
+                                             'short_employment',
+                                             'young_age',
+                                             'cnt_non_child',
+                                             'child_to_non_child_ratio',
+                                             'income_per_non_child',
+                                             'credit_per_person',
+                                             'credit_per_child',
+                                             'credit_per_non_child',
+                                             ]
+
+    def transform(self, X, **kwargs):
+        X['annuity_income_percentage'] = X[
+            'AMT_ANNUITY'] / X['AMT_INCOME_TOTAL']
+        X['car_to_birth_ratio'] = X['OWN_CAR_AGE'] / X['DAYS_BIRTH']
+        X['car_to_employ_ratio'] = X['OWN_CAR_AGE'] / X['DAYS_EMPLOYED']
+        X['children_ratio'] = X['CNT_CHILDREN'] / X['CNT_FAM_MEMBERS']
+        X['credit_to_annuity_ratio'] = X['AMT_CREDIT'] / X['AMT_ANNUITY']
+        X['credit_to_goods_ratio'] = X['AMT_CREDIT'] / X['AMT_GOODS_PRICE']
+        X['credit_to_income_ratio'] = X['AMT_CREDIT'] / X['AMT_INCOME_TOTAL']
+        X['days_employed_percentage'] = X['DAYS_EMPLOYED'] / X['DAYS_BIRTH']
+        X['income_credit_percentage'] = X['AMT_INCOME_TOTAL'] / X['AMT_CREDIT']
+        X['income_per_child'] = X['AMT_INCOME_TOTAL'] / (1 + X['CNT_CHILDREN'])
+        X['income_per_person'] = X['AMT_INCOME_TOTAL'] / X['CNT_FAM_MEMBERS']
+        X['payment_rate'] = X['AMT_ANNUITY'] / X['AMT_CREDIT']
+        X['phone_to_birth_ratio'] = X['DAYS_LAST_PHONE_CHANGE'] / X['DAYS_BIRTH']
+        X['phone_to_employ_ratio'] = X[
+            'DAYS_LAST_PHONE_CHANGE'] / X['DAYS_EMPLOYED']
+        X['external_sources_weighted'] = X.EXT_SOURCE_1 * \
+            2 + X.EXT_SOURCE_2 * 3 + X.EXT_SOURCE_3 * 4
+        X['cnt_non_child'] = X['CNT_FAM_MEMBERS'] - X['CNT_CHILDREN']
+        X['child_to_non_child_ratio'] = X['CNT_CHILDREN'] / X['cnt_non_child']
+        X['income_per_non_child'] = X['AMT_INCOME_TOTAL'] / X['cnt_non_child']
+        X['credit_per_person'] = X['AMT_CREDIT'] / X['CNT_FAM_MEMBERS']
+        X['credit_per_child'] = X['AMT_CREDIT'] / (1 + X['CNT_CHILDREN'])
+        X['credit_per_non_child'] = X['AMT_CREDIT'] / X['cnt_non_child']
+        for function_name in ['min', 'max', 'sum', 'mean', 'nanmedian']:
+            X['external_sources_{}'.format(function_name)] = eval('np.{}'.format(function_name))(
+                X[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']], axis=1)
+
+        X['short_employment'] = (X['DAYS_EMPLOYED'] < -2000).astype(int)
+        X['young_age'] = (X['DAYS_BIRTH'] < -14000).astype(int)
+
+        return X[self.numerical_columns + self.engineered_numerical_columns + ['SK_ID_CURR'] + ['TARGET']]
+
+
+class BureauFeatures(BasicHandCraftedFeatures):
+
+    def fit(self, bureau, **kwargs):
+        bureau['bureau_credit_active_binary'] = (
+            bureau['CREDIT_ACTIVE'] != 'Closed').astype(int)
+        bureau['bureau_credit_enddate_binary'] = (
+            bureau['DAYS_CREDIT_ENDDATE'] > 0).astype(int)
+        features = pd.DataFrame({'SK_ID_CURR': bureau['SK_ID_CURR'].unique()})
+
+        groupby = bureau.groupby(by=['SK_ID_CURR'])
+
+        g = groupby['DAYS_CREDIT'].agg('count').reset_index()
+        g.rename(index=str, columns={
+                 'DAYS_CREDIT': 'bureau_number_of_past_loans'}, inplace=True)
+        features = features.merge(g, on=['SK_ID_CURR'], how='left')
+
+        g = groupby['CREDIT_TYPE'].agg('nunique').reset_index()
+        g.rename(index=str, columns={
+                 'CREDIT_TYPE': 'bureau_number_of_loan_types'}, inplace=True)
+        features = features.merge(g, on=['SK_ID_CURR'], how='left')
+
+        g = groupby['bureau_credit_active_binary'].agg('mean').reset_index()
+        g.rename(index=str, columns={
+                 'bureau_credit_active_binary': 'bureau_credit_active_binary'}, inplace=True)
+        features = features.merge(g, on=['SK_ID_CURR'], how='left')
+
+        g = groupby['AMT_CREDIT_SUM_DEBT'].agg('sum').reset_index()
+        g.rename(index=str, columns={
+                 'AMT_CREDIT_SUM_DEBT': 'bureau_total_customer_debt'}, inplace=True)
+        features = features.merge(g, on=['SK_ID_CURR'], how='left')
+
+        g = groupby['AMT_CREDIT_SUM'].agg('sum').reset_index()
+        g.rename(index=str, columns={
+                 'AMT_CREDIT_SUM': 'bureau_total_customer_credit'}, inplace=True)
+        features = features.merge(g, on=['SK_ID_CURR'], how='left')
+
+        g = groupby['AMT_CREDIT_SUM_OVERDUE'].agg('sum').reset_index()
+        g.rename(index=str, columns={
+                 'AMT_CREDIT_SUM_OVERDUE': 'bureau_total_customer_overdue'}, inplace=True)
+        features = features.merge(g, on=['SK_ID_CURR'], how='left')
+
+        g = groupby['CNT_CREDIT_PROLONG'].agg('sum').reset_index()
+        g.rename(index=str, columns={
+                 'CNT_CREDIT_PROLONG': 'bureau_average_creditdays_prolonged'}, inplace=True)
+        features = features.merge(g, on=['SK_ID_CURR'], how='left')
+
+        g = groupby['bureau_credit_enddate_binary'].agg('mean').reset_index()
+        g.rename(index=str, columns={
+                 'bureau_credit_enddate_binary': 'bureau_credit_enddate_percentage'}, inplace=True)
+        features = features.merge(g, on=['SK_ID_CURR'], how='left')
+
+        features['bureau_average_of_past_loans_per_type'] = \
+            features['bureau_number_of_past_loans'] / \
+            features['bureau_number_of_loan_types']
+
+        features['bureau_debt_credit_ratio'] = \
+            features['bureau_total_customer_debt'] / \
+            features['bureau_total_customer_credit']
+
+        features['bureau_overdue_debt_ratio'] = \
+            features['bureau_total_customer_overdue'] / \
+            features['bureau_total_customer_debt']
+
+        self.features = features
+        return self
+
+
+class GroupbyMerge(BaseTransformer):
 
     def __init__(self, id_columns, **kwargs):
-        # super().__init__()
+        super().__init__()
         self.id_columns = id_columns
 
     def _feature_names(self, features):
@@ -590,7 +734,280 @@ class GroupbyMerge():
                             right_on=[self.id_columns[1]],
                             how='left',
                             validate='one_to_one')
-        return table.astype(np.float32)
+        return table
+
+
+class GroupbyAggregateDiffs(BaseTransformer):
+
+    def __init__(self, groupby_aggregations, use_diffs_only=False, **kwargs):
+        super().__init__()
+        self.groupby_aggregations = groupby_aggregations
+        self.use_diffs_only = use_diffs_only
+        self.features = []
+        self.groupby_feature_names = []
+
+    @property
+    def feature_names(self):
+        if self.use_diffs_only:
+            return self.diff_feature_names + ['SK_ID_CURR']
+        else:
+            return self.groupby_feature_names + self.diff_feature_names + ['SK_ID_CURR']
+
+    def fit(self, main_table, **kwargs):
+        for groupby_cols, specs in self.groupby_aggregations:
+            group_object = main_table.groupby(groupby_cols)
+            for select, agg in specs:
+                groupby_aggregate_name = self._create_colname_from_specs(
+                    groupby_cols, select, agg)
+                group_features = group_object[select].agg(agg).reset_index() \
+                    .rename(index=str,
+                            columns={select: groupby_aggregate_name})[groupby_cols + [groupby_aggregate_name]]
+
+                self.features.append((groupby_cols, group_features))
+                self.groupby_feature_names.append(groupby_aggregate_name)
+        return self
+
+    def transform(self, main_table, **kwargs):
+        main_table = self._merge_grouby_features(main_table)
+        main_table = self._add_diff_features(main_table)
+
+        return main_table[self.feature_names].astype(np.float32)
+
+    def _merge_grouby_features(self, main_table):
+        for groupby_cols, groupby_features in self.features:
+            main_table = main_table.merge(groupby_features,
+                                          on=groupby_cols,
+                                          how='left')
+        return main_table
+
+    def _add_diff_features(self, main_table):
+        self.diff_feature_names = []
+        for groupby_cols, specs in self.groupby_aggregations:
+            for select, agg in specs:
+                if agg in ['mean', 'median', 'max', 'min']:
+                    groupby_aggregate_name = self._create_colname_from_specs(
+                        groupby_cols, select, agg)
+                    diff_feature_name = '{}_diff'.format(
+                        groupby_aggregate_name)
+                    abs_diff_feature_name = '{}_abs_diff'.format(
+                        groupby_aggregate_name)
+
+                    main_table[diff_feature_name] = main_table[
+                        select] - main_table[groupby_aggregate_name]
+                    main_table[abs_diff_feature_name] = np.abs(
+                        main_table[select] - main_table[groupby_aggregate_name])
+
+                    self.diff_feature_names.append(diff_feature_name)
+                    self.diff_feature_names.append(abs_diff_feature_name)
+
+        return main_table
+
+    def load(self, filepath):
+        params = joblib.load(filepath)
+        self.features = params['features']
+        self.groupby_feature_names = params['groupby_feature_names']
+        return self
+
+    def persist(self, filepath):
+        params = {'features': self.features,
+                  'groupby_feature_names': self.groupby_feature_names}
+        joblib.dump(params, filepath)
+
+    def _create_colname_from_specs(self, groupby_cols, agg, select):
+        return '{}_{}_{}'.format('_'.join(groupby_cols), agg, select)
+
+
+class GroupbyAggregate(BaseTransformer):
+
+    def __init__(self, table_name, id_columns, groupby_aggregations, **kwargs):
+        super().__init__()
+        self.table_name = table_name
+        self.id_columns = id_columns
+        self.groupby_aggregations = groupby_aggregations
+
+    def fit(self, table, **kwargs):
+        features = pd.DataFrame(
+            {self.id_columns[0]: table[self.id_columns[0]].unique()})
+
+        for groupby_cols, specs in self.groupby_aggregations:
+            group_object = table.groupby(groupby_cols)
+            for select, agg in specs:
+                groupby_aggregate_name = self._create_colname_from_specs(
+                    groupby_cols, select, agg)
+                features = features.merge(group_object[select]
+                                          .agg(agg)
+                                          .reset_index()
+                                          .rename(index=str,
+                                                  columns={select: groupby_aggregate_name})
+                                          [groupby_cols + [groupby_aggregate_name]],
+                                          on=groupby_cols,
+                                          how='left')
+        self.features = features
+        return self
+
+    def transform(self, table, **kwargs):
+        return {'features_table': self.features}
+
+    def load(self, filepath):
+        self.features = joblib.load(filepath)
+        return self
+
+    def persist(self, filepath):
+        joblib.dump(self.features, filepath)
+
+    def _create_colname_from_specs(self, groupby_cols, select, agg):
+        return '{}_{}_{}_{}'.format(self.table_name, '_'.join(groupby_cols), agg, select)
+
+
+class ConcatFeatures(BaseTransformer):
+
+    def transform(self, **kwargs):
+        features_concat = []
+        for _, feature in kwargs.items():
+            feature.reset_index(drop=True, inplace=True)
+            features_concat.append(feature)
+        features_concat = pd.concat(features_concat, axis=1)
+        return features_concat
+
+
+class FeatureJoiner(BaseTransformer):
+
+    def __init__(self, use_nan_count=False, **kwargs):
+        super().__init__()
+        self.use_nan_count = use_nan_count
+
+    def transform(self, numerical_feature_list, categorical_feature_list, **kwargs):
+        features = numerical_feature_list + categorical_feature_list
+        for feature in features:
+            feature.reset_index(drop=True, inplace=True)
+        features = pd.concat(features, axis=1).astype(np.float32)
+        if self.use_nan_count:
+            features['nan_count'] = features.isnull().sum(axis=1)
+
+        outputs = dict()
+        outputs['features'] = features
+        outputs['feature_names'] = list(features.columns)
+        outputs['categorical_features'] = self._get_feature_names(
+            categorical_feature_list)
+        return outputs
+
+    def _get_feature_names(self, dataframes):
+        feature_names = []
+        for dataframe in dataframes:
+            try:
+                feature_names.extend(list(dataframe.columns))
+            except Exception as e:
+                print(e)
+                feature_names.append(dataframe.name)
+
+        return feature_names
+
+
+class CategoricalEncoder(BaseTransformer):
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.categorical_columns = kwargs['categorical_columns']
+        params = deepcopy(kwargs)
+        params.pop('categorical_columns', None)
+        self.params = params
+        self.encoder_class = ce.OrdinalEncoder
+        self.categorical_encoder = None
+
+    def fit(self, X, y, **kwargs):
+        X_ = X[self.categorical_columns]
+        self.categorical_encoder = self.encoder_class(
+            cols=self.categorical_columns, **self.params)
+        self.categorical_encoder.fit(X_, y)
+        return self
+
+    def transform(self, X, **kwargs):
+        id = X['SK_ID_CURR']
+        X_ = X[self.categorical_columns]
+        X_ = self.categorical_encoder.transform(X_)
+        X_['SK_ID_CURR'] = id
+        return X_
+
+    def load(self, filepath):
+        self.categorical_encoder = joblib.load(filepath)
+        return self
+
+    def persist(self, filepath):
+        joblib.dump(self.categorical_encoder, filepath)
+
+
+class ApplicationCleaning(BaseTransformer):
+
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    def transform(self, X):
+        X['CODE_GENDER'].replace('XNA', np.nan, inplace=True)
+        X['DAYS_EMPLOYED'].replace(365243, np.nan, inplace=True)
+        X['DAYS_LAST_PHONE_CHANGE'].replace(0, np.nan, inplace=True)
+        X['NAME_FAMILY_STATUS'].replace('Unknown', np.nan, inplace=True)
+        X['ORGANIZATION_TYPE'].replace('XNA', np.nan, inplace=True)
+
+        return X
+
+
+class BureauCleaning(BaseTransformer):
+
+    def __init__(self, fill_missing=False, fill_value=0, **kwargs):
+        self.fill_missing = fill_missing
+        self.fill_value = fill_value
+
+    def transform(self, bureau):
+        bureau['DAYS_CREDIT_ENDDATE'][
+            bureau['DAYS_CREDIT_ENDDATE'] < -40000] = np.nan
+        bureau['DAYS_CREDIT_UPDATE'][
+            bureau['DAYS_CREDIT_UPDATE'] < -40000] = np.nan
+        bureau['DAYS_ENDDATE_FACT'][
+            bureau['DAYS_ENDDATE_FACT'] < -40000] = np.nan
+
+        if self.fill_missing:
+            bureau['AMT_CREDIT_SUM'].fillna(self.fill_value, inplace=True)
+            bureau['AMT_CREDIT_SUM_DEBT'].fillna(self.fill_value, inplace=True)
+            bureau['AMT_CREDIT_SUM_OVERDUE'].fillna(
+                self.fill_value, inplace=True)
+            bureau['CNT_CREDIT_PROLONG'].fillna(self.fill_value, inplace=True)
+
+        return bureau
+
+
+class CreditCardCleaning(BaseTransformer):
+
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    def transform(self, credit_card):
+        credit_card['AMT_DRAWINGS_ATM_CURRENT'][
+            credit_card['AMT_DRAWINGS_ATM_CURRENT'] < 0] = np.nan
+        credit_card['AMT_DRAWINGS_CURRENT'][
+            credit_card['AMT_DRAWINGS_CURRENT'] < 0] = np.nan
+
+        return credit_card
+
+
+class PreviousApplicationCleaning(BaseTransformer):
+
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    def transform(self, previous_application):
+        previous_application['DAYS_FIRST_DRAWING'].replace(
+            365243, np.nan, inplace=True)
+        previous_application['DAYS_FIRST_DUE'].replace(
+            365243, np.nan, inplace=True)
+        previous_application['DAYS_LAST_DUE_1ST_VERSION'].replace(
+            365243, np.nan, inplace=True)
+        previous_application['DAYS_LAST_DUE'].replace(
+            365243, np.nan, inplace=True)
+        previous_application['DAYS_TERMINATION'].replace(
+            365243, np.nan, inplace=True)
+
+        return previous_application
+
 
 if __name__ == '__main__':
     DATA_PATH = './data/'

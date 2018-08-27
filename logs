@@ -21,7 +21,10 @@ Baseline with Stratified5Fold
 					Added Agg on Application
 						Mean val error: 0.7905952910589203, std 0.003449348907935949
 
-Prune 0 fi
-	Mean val error: 0.7913421886568984, std 0.003994912997970823
-	second level prune
-		Mean val error: 0.7918223901036008, std 0.0040154112841769935
+
+Prune  ref: Mean val error: 0.7922271540920814 LB0.797
+	0 fi
+		Mean val score: 0.7927595532138081, std 0.0037005068609195415 LB0.796
+	remove last 150
+		Mean val score: 0.7926336242743488, std 0.004194178430347736
+
